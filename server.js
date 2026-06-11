@@ -6,33 +6,86 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ==========================================
-// 1. חיבור למסד הנתונים (PostgreSQL)
+// 1. חיבור למסד הנתונים
 // ==========================================
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false }
 });
 
-pool.on('error', (err) => console.error('DB Error:', err.message));
+// פונקציית קסם: בונה את הטבלאות אוטומטית מהטרמינל/שרת בריצה הראשונה!
+async function initDatabase() {
+    try {
+        console.log('Starting DB migration...');
+        
+        // יצירת טבלת משפחות
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS tenants (
+                family_id SERIAL PRIMARY KEY,
+                tenant_name VARCHAR(100) NOT NULL,
+                join_code VARCHAR(20) UNIQUE NOT NULL,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+
+        // יצירת טבלת משתמשים
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                family_id INT REFERENCES tenants(family_id),
+                phone_number VARCHAR(20) UNIQUE NOT NULL,
+                user_name VARCHAR(100),
+                role VARCHAR(20) DEFAULT 'user',
+                is_approved BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+
+        // יצירת טבלת הודעות
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS messages (
+                id SERIAL PRIMARY KEY,
+                family_id INT REFERENCES tenants(family_id),
+                sender_id INT REFERENCES users(id),
+                file_path VARCHAR(255) NOT NULL,
+                is_deleted BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+
+        // הכנסת משפחת בדיקה ראשונית
+        await pool.query(`
+            INSERT INTO tenants (tenant_name, join_code, is_active) 
+            VALUES ('משפחת שפירא', '102030', true)
+            ON CONFLICT (join_code) DO NOTHING;
+        `);
+
+        console.log('DB Migration completed successfully! All tables ready.');
+    } catch (err) {
+        console.error('Error during DB Migration:', err.message);
+    }
+}
+
+// הרצת האתחול אוטומטית
+initDatabase();
+
 app.set('db', pool);
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// הגדרת פלט כטקסט נקי - קריטי עבור ימות המשיח
 app.use((req, res, next) => {
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     next();
 });
 
 // ==========================================
-// 2. MIDDLEWARE: חילוץ נתוני טלפוניה ו-Session
+// 2. MIDDLEWARE CONTEXT
 // ==========================================
 app.use((req, res, next) => {
     const apiPhone = req.query.ApiPhone || req.body.ApiPhone || '0500000000';
     const apiCallId = req.query.ApiCallId || req.body.ApiCallId || 'test_' + Date.now();
-    
-    // שליפת הספרות שהמשתמש הקיש (אם חזר משלבי read)
     const digits = req.query.digits || req.body.digits || null;
 
     req.telephony = {
@@ -44,18 +97,14 @@ app.use((req, res, next) => {
 });
 
 // ==========================================
-// 3. הראוטר המרכזי והאפיון המלא
+// 3. ROUTING SYSTEM
 // ==========================================
 
-/**
- * שלוחה ראשית: אימות כניסה וזיהוי משפחתי (Multi-Tenant)
- */
 app.get('/api/v1/auth', async (req, res) => {
     const db = req.app.get('db');
     const { phone, digits } = req.telephony;
 
     try {
-        // בדיקה האם המספר רשום ומאושר
         const userQuery = `
             SELECT u.id as user_id, u.family_id, u.is_approved, t.tenant_name 
             FROM users u
@@ -64,23 +113,19 @@ app.get('/api/v1/auth', async (req, res) => {
         `;
         const result = await db.query(userQuery, [phone]);
 
-        // תרחיש א': המשתמש רשום ומאושר במערכת
         if (result.rows.length > 0 && result.rows[0].is_approved) {
             const user = result.rows[0];
             return res.send(`id_list_message=t-ברוכים הבאים למערכת המשפחתית של ${user.tenant_name}.&read=t-להאזנה להודעות הקש 1. להקלטת הודעה חדשה הקש 2.=digits,yes,1,1,7,Number,no`);
         }
 
-        // תרחיש ב': המשתמש רשום אך ממתין לאישור מנהל
         if (result.rows.length > 0 && !result.rows[0].is_approved) {
             return res.send('id_list_message=t-חשבונך ממתין לאישור מנהל המשפחה. אנא נסה שנית מאוחר יותר.&hangup=yes');
         }
 
-        // תרחיש ג': משתמש חדש לחלוטין - תהליך רישום אוטומטי (קוד משפחתי)
         if (!digits) {
             return res.send('read=t-שלום. מספרכם אינו מוכר במערכת. אנא הקישו את קוד ההצטרפות המשפחתי שלכם ולאחריו סולמית.=digits,yes,6,6,10,Number,no');
         }
 
-        // בדיקת הקוד שהוקש מול טבלת המשפחות
         const tenantCheck = await db.query('SELECT family_id, tenant_name FROM tenants WHERE join_code = $1 AND is_active = true', [digits]);
         
         if (tenantCheck.rows.length === 0) {
@@ -89,7 +134,6 @@ app.get('/api/v1/auth', async (req, res) => {
 
         const tenant = tenantCheck.rows[0];
 
-        // יצירת המשתמש במצב ממתין (Pending)
         await db.query(
             'INSERT INTO users (family_id, phone_number, user_name, role, is_approved) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING',
             [tenant.family_id, phone, 'משתמש חדש', 'user', false]
@@ -103,47 +147,8 @@ app.get('/api/v1/auth', async (req, res) => {
     }
 });
 
-/**
- * שלוחה 1: האזנת פינג-פונג דינמית להודעות חיות
- */
-app.get('/api/v1/listen', async (req, res) => {
-    const db = req.app.get('db');
-    const { phone, digits } = req.telephony;
-
-    try {
-        // שליפת פרטי המשתמש והמשפחה שלו
-        const userResult = await db.query('SELECT id, family_id FROM users WHERE phone_number = $1 AND is_approved = true', [phone]);
-        if (userResult.rows.length === 0) return res.send('go_to_folder=/');
-        
-        const user = userResult.rows[0];
-
-        // לוגיקה זמנית: במידה ואין עדיין הודעות במסד, נשמיע הודעת מערכת קבועה
-        const msgQuery = `SELECT id, file_path FROM messages WHERE family_id = $1 AND is_deleted = false ORDER BY created_at DESC LIMIT 1`;
-        const msgResult = await db.query(msgQuery, [user.family_id]);
-
-        if (msgResult.rows.length === 0) {
-            return res.send('id_list_message=t-אין הודעות חדשות בקו המשפחתי.&go_to_folder=/');
-        }
-
-        // השמעת ההודעה האחרונה שנמצאה
-        const message = msgResult.rows[0];
-        return res.send(`id_list_message=f-${message.file_path}&read=t-לשמיעה חוזרת הקש 1. למחיקת ההודעה הקש 7.=digits,yes,1,1,7,Number,no`);
-
-    } catch (error) {
-        return res.send('id_list_message=t-שגיאה בשלוחת ההאזנה.&go_to_folder=/');
-    }
-});
-
-/**
- * שלוחה 2: הקלטת הודעה חדשה
- */
-app.get('/api/v1/send', async (req, res) => {
-    // שלב זה מכין את המערכת לקבלת קובץ ההקלטה הפיזי מימות המשיח
-    return res.send('id_list_message=t-שלוחת ההקלטה מוכנה. אנא הקליטו את הודעתכם לאחר הצליל.&hangup=yes');
-});
-
-// טיפול בשגיאות מערכת
 app.use((err, req, res, next) => {
+    console.error('Global Error:', err.stack);
     res.status(200).send('id_list_message=t-אירעה שגיאה כללית זמנית.&hangup=yes');
 });
 
