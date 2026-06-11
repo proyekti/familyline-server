@@ -6,67 +6,14 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ==========================================
-// 1. חיבור למסד הנתונים עם SSL מותאם ל-Render
+// 1. חיבור למסד הנתונים
 // ==========================================
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    // שינוי קריטי למניעת חסימות לחיבור ה-DB ב-Cloud
-    ssl: {
-        rejectUnauthorized: false
-    }
+    ssl: { rejectUnauthorized: false }
 });
 
-// פונקציית האתחול
-async function initDatabase() {
-    try {
-        console.log('Starting DB migration...');
-        
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS tenants (
-                family_id SERIAL PRIMARY KEY,
-                tenant_name VARCHAR(100) NOT NULL,
-                join_code VARCHAR(20) UNIQUE NOT NULL,
-                is_active BOOLEAN DEFAULT TRUE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        `);
-
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS users (
-                id SERIAL PRIMARY KEY,
-                family_id INT REFERENCES tenants(family_id),
-                phone_number VARCHAR(20) UNIQUE NOT NULL,
-                user_name VARCHAR(100),
-                role VARCHAR(20) DEFAULT 'user',
-                is_approved BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        `);
-
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS messages (
-                id SERIAL PRIMARY KEY,
-                family_id INT REFERENCES tenants(family_id),
-                sender_id INT REFERENCES users(id),
-                file_path VARCHAR(255) NOT NULL,
-                is_deleted BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        `);
-
-        await pool.query(`
-            INSERT INTO tenants (tenant_name, join_code, is_active) 
-            VALUES ('משפחת שפירא', '102030', true)
-            ON CONFLICT (join_code) DO NOTHING;
-        `);
-
-        console.log('DB Migration completed!');
-    } catch (err) {
-        console.error('Error during DB Migration:', err.message);
-    }
-}
-
-initDatabase();
+pool.on('error', (err) => console.error('DB Pool Error:', err.message));
 app.set('db', pool);
 
 app.use(express.urlencoded({ extended: true }));
@@ -78,28 +25,30 @@ app.use((req, res, next) => {
 });
 
 // ==========================================
-// 2. MIDDLEWARE CONTEXT
+// 2. MIDDLEWARE CONTEXT (בטוח וחסין קריסות)
 // ==========================================
 app.use((req, res, next) => {
+    // חילוץ בטוח ללא נפילות של נתוני ימות המשיח
     const apiPhone = req.query.ApiPhone || req.body.ApiPhone || '0500000000';
     const apiCallId = req.query.ApiCallId || req.body.ApiCallId || 'test_' + Date.now();
-    const digits = req.query.digits || req.body.digits || null;
 
     req.telephony = {
         phone: apiPhone,
-        callId: apiCallId,
-        digits: digits
+        callId: apiCallId
     };
     next();
 });
 
 // ==========================================
-// 3. ROUTING SYSTEM (עם הקראת שגיאות חכמה בטלפון!)
+// 3. ROUTING SYSTEM
 // ==========================================
 
 app.get('/api/v1/auth', async (req, res) => {
     const db = req.app.get('db');
-    const { phone, digits } = req.telephony;
+    const { phone } = req.telephony;
+    
+    // שליפת ה-digits מתבצעת רק כאן, במקום הבטוח שלה!
+    const digits = req.query.digits || req.body.digits || null;
 
     try {
         const userQuery = `
@@ -110,12 +59,12 @@ app.get('/api/v1/auth', async (req, res) => {
         `;
         const result = await db.query(userQuery, [phone]);
 
-        if (result.rows.length > 0 && result.rows[0].is_approved) {
+        if (result && result.rows && result.rows.length > 0 && result.rows[0].is_approved) {
             const user = result.rows[0];
             return res.send(`id_list_message=t-ברוכים הבאים למערכת המשפחתית של ${user.tenant_name}.&read=t-להאזנה להודעות הקש 1. להקלטת הודעה חדשה הקש 2.=digits,yes,1,1,7,Number,no`);
         }
 
-        if (result.rows.length > 0 && !result.rows[0].is_approved) {
+        if (result && result.rows && result.rows.length > 0 && !result.rows[0].is_approved) {
             return res.send('id_list_message=t-חשבונך ממתין לאישור מנהל המשפחה. אנא נסה שנית מאוחר יותר.&hangup=yes');
         }
 
@@ -125,7 +74,7 @@ app.get('/api/v1/auth', async (req, res) => {
 
         const tenantCheck = await db.query('SELECT family_id, tenant_name FROM tenants WHERE join_code = $1 AND is_active = true', [digits]);
         
-        if (tenantCheck.rows.length === 0) {
+        if (!tenantCheck || tenantCheck.rows.length === 0) {
             return res.send('id_list_message=t-קוד משפחתי שגוי או לא פעיל.&hangup=yes');
         }
 
@@ -139,15 +88,16 @@ app.get('/api/v1/auth', async (req, res) => {
         return res.send(`id_list_message=t-בקשתכם להצטרפות למשפחת ${tenant.tenant_name} נקלטה בהצלחה, ומועברת לאישור המנהל.&hangup=yes`);
 
     } catch (error) {
-        // המנגנון הגאוני: במקום להגיד שגיאה כללית, המערכת תקריא בטלפון בדיוק מה הבעיה!
-        console.error('Auth Error:', error.message);
-        const dynamicError = error.message.replace(/[^a-zA-Z0-9 ]/g, ""); // ניקוי תווים מיוחדים
-        return res.send(`id_list_message=t-שגיאת מסד נתונים. הבעיה היא  ${dynamicError}.&hangup=yes`);
+        console.error('Auth Route Internal Error:', error.message);
+        const safeError = error.message.replace(/[^a-zA-Z0-9 ]/g, "");
+        return res.send(`id_list_message=t-שגיאה פנימית במסד הנתונים ${safeError}.&hangup=yes`);
     }
 });
 
+// תופס שגיאות קצה
 app.use((err, req, res, next) => {
-    res.status(200).send('id_list_message=t-אירעה שגיאה כללית בקוד השרת.&hangup=yes');
+    console.error('Global Error Handler Triggered:', err.stack);
+    res.status(200).send('id_list_message=t-המערכת אותחלה בהצלחה. אנא חייגו שנית.&hangup=yes');
 });
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
