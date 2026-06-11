@@ -45,21 +45,21 @@ app.use((req, res, next) => {
 });
 
 // ==========================================
-// 3. ROUTING SYSTEM (בדיקת דופק נקייה וממוקדת)
+// 3. ROUTING SYSTEM (ניתוב יציב ללא שגיאות)
 // ==========================================
 
-// שלוחת הניתוב הראשית שאליה פונה ה-ext.ini שלכם
+// שלוחת הניתוב הראשית שאליה פונה ה-ext.ini שלכם בשלוחת השורש
 app.get('/api/v1/auth', (req, res) => {
     console.log(`Inbound call received from phone: ${req.telephony.phone}`);
     
-    // פקודה פשוטה ויציבה ביותר: השמעת הודעה וניתוק מבוקר כדי למנוע קריסה בימות המשיח
-    return res.send('id_list_message=t-החלום מתגשם. השרת שלכם ברנדר עונה בהצלחה למרכזייה של ימות המשיח.&hangup=yes');
+    // מעבר חלק לשלוחה 1 במרכזייה מיד לאחר השמעת ההודעה, בלי לנתק ובלי שגיאות!
+    return res.send('id_list_message=t-החיבור לשרת הצליח בהצלחה. מועברים לשלוחת ההאזנה.&go_to_folder=/1');
 });
 
 // טיפול גלובלי בשגיאות כדי למנוע קריסת HTTP 500
 app.use((err, req, res, next) => {
     console.error('Global Error:', err.stack);
-    res.status(200).send('id_list_message=t-שגיאה כללית בשרת האפליקציה.&hangup=yes');
+    res.status(200).send('id_list_message=t-שגיאה כללית בשרת האפליקציה.&go_to_folder=/');
 });
 
 app.listen(PORT, () => {
