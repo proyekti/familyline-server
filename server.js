@@ -6,19 +6,21 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ==========================================
-// 1. חיבור למסד הנתונים
+// 1. חיבור למסד הנתונים עם SSL מותאם ל-Render
 // ==========================================
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
+    // שינוי קריטי למניעת חסימות לחיבור ה-DB ב-Cloud
+    ssl: {
+        rejectUnauthorized: false
+    }
 });
 
-// פונקציית קסם: בונה את הטבלאות אוטומטית מהטרמינל/שרת בריצה הראשונה!
+// פונקציית האתחול
 async function initDatabase() {
     try {
         console.log('Starting DB migration...');
         
-        // יצירת טבלת משפחות
         await pool.query(`
             CREATE TABLE IF NOT EXISTS tenants (
                 family_id SERIAL PRIMARY KEY,
@@ -29,7 +31,6 @@ async function initDatabase() {
             );
         `);
 
-        // יצירת טבלת משתמשים
         await pool.query(`
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
@@ -42,7 +43,6 @@ async function initDatabase() {
             );
         `);
 
-        // יצירת טבלת הודעות
         await pool.query(`
             CREATE TABLE IF NOT EXISTS messages (
                 id SERIAL PRIMARY KEY,
@@ -54,22 +54,19 @@ async function initDatabase() {
             );
         `);
 
-        // הכנסת משפחת בדיקה ראשונית
         await pool.query(`
             INSERT INTO tenants (tenant_name, join_code, is_active) 
             VALUES ('משפחת שפירא', '102030', true)
             ON CONFLICT (join_code) DO NOTHING;
         `);
 
-        console.log('DB Migration completed successfully! All tables ready.');
+        console.log('DB Migration completed!');
     } catch (err) {
         console.error('Error during DB Migration:', err.message);
     }
 }
 
-// הרצת האתחול אוטומטית
 initDatabase();
-
 app.set('db', pool);
 
 app.use(express.urlencoded({ extended: true }));
@@ -97,7 +94,7 @@ app.use((req, res, next) => {
 });
 
 // ==========================================
-// 3. ROUTING SYSTEM
+// 3. ROUTING SYSTEM (עם הקראת שגיאות חכמה בטלפון!)
 // ==========================================
 
 app.get('/api/v1/auth', async (req, res) => {
@@ -142,14 +139,15 @@ app.get('/api/v1/auth', async (req, res) => {
         return res.send(`id_list_message=t-בקשתכם להצטרפות למשפחת ${tenant.tenant_name} נקלטה בהצלחה, ומועברת לאישור המנהל.&hangup=yes`);
 
     } catch (error) {
+        // המנגנון הגאוני: במקום להגיד שגיאה כללית, המערכת תקריא בטלפון בדיוק מה הבעיה!
         console.error('Auth Error:', error.message);
-        return res.send('id_list_message=t-שגיאת מערכת בתהליך הזיהוי.&hangup=yes');
+        const dynamicError = error.message.replace(/[^a-zA-Z0-9 ]/g, ""); // ניקוי תווים מיוחדים
+        return res.send(`id_list_message=t-שגיאת מסד נתונים. הבעיה היא  ${dynamicError}.&hangup=yes`);
     }
 });
 
 app.use((err, req, res, next) => {
-    console.error('Global Error:', err.stack);
-    res.status(200).send('id_list_message=t-אירעה שגיאה כללית זמנית.&hangup=yes');
+    res.status(200).send('id_list_message=t-אירעה שגיאה כללית בקוד השרת.&hangup=yes');
 });
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
