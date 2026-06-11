@@ -1,5 +1,37 @@
+const express = require('express');
+const { Pool } = require('pg');
+require('dotenv').config();
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
 // ==========================================
-// 2. MIDDLEWARES: ניהול Context ו-SaaS Tenant
+// 1. חיבור לבסיס הנתונים (PostgreSQL)
+// ==========================================
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+});
+
+pool.connect((err, client, release) => {
+    if (err) {
+        return console.error('Error acquiring client', err.stack);
+    }
+    console.log('Successfully connected to PostgreSQL Database on Render.');
+    release();
+});
+
+app.set('db', pool);
+
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+app.use((req, res, next) => {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    next();
+});
+
+// ==========================================
+// 2. MIDDLEWARES & CONTEXT
 // ==========================================
 
 const y_telephonyContext = async (req, res, next) => {
@@ -20,9 +52,6 @@ const y_telephonyContext = async (req, res, next) => {
     next();
 };
 
-/**
- * ה-Middleware שונה לפונקציה רגילה שנפעיל רק בנתיבים מוגנים
- */
 const requireTenant = async (req, res, next) => {
     const db = req.app.get('db');
     const { phone } = req.telephony;
@@ -37,7 +66,6 @@ const requireTenant = async (req, res, next) => {
         const result = await db.query(userQuery, [phone]);
 
         if (result.rows.length === 0) {
-            // משתמש לא רשום - נשאר בשלוחת ה-Auth
             return res.send('id_list_message=t-המספר אינו מוכר במערכת.&go_to_folder=/');
         }
 
@@ -61,21 +89,20 @@ const requireTenant = async (req, res, next) => {
     }
 };
 
-// החלת ה-Context הגלובלי בלבד
+// הפעלת ה-Context הגלובלי
 app.use(y_telephonyContext);
 
 // ==========================================
-// 3. ROUTING SYSTEM: ניתוב שלוחות ימות המשיח
+// 3. ROUTING SYSTEM
 // ==========================================
 
-// שלוחת כניסה ואימות (פתוחה - ללא requireTenant)
+// שלוחת אימות (ללא requireTenant)
 app.get('/api/v1/auth', async (req, res) => {
     const db = req.app.get('db');
     const { phone } = req.telephony;
     const digits = req.query.digits;
 
     try {
-        // בדיקה האם המשתמש כבר קיים ומאושר
         const checkUser = await db.query('SELECT family_id FROM users WHERE phone_number = $1 AND is_approved = true', [phone]);
         
         if (checkUser.rows.length > 0) {
@@ -107,7 +134,7 @@ app.get('/api/v1/auth', async (req, res) => {
     }
 });
 
-// שלוחות מוגנות - שים לב לתוספת של requireTenant באמצע!
+// שלוחות מוגנות (עם requireTenant)
 app.get('/api/v1/listen', requireTenant, async (req, res) => {
     return res.send(`id_list_message=t-נכנסתם לשלוחת ההאזנה של ${req.tenant.familyName}.`);
 });
@@ -117,6 +144,14 @@ app.get('/api/v1/send', requireTenant, async (req, res) => {
 });
 
 app.get('/api/v1/tzintuk', requireTenant, async (req, res) => {
-    // ... לוגיקת צינתוקים קיימת
     return res.send('id_list_message=t-שלוחת צינתוקים.');
+});
+
+app.use((err, req, res, next) => {
+    console.error('Global Error Handler:', err.stack);
+    res.status(500).send('id_list_message=t-שגיאה כללית בשרת האפליקציה.');
+});
+
+app.listen(PORT, () => {
+    console.log(`FamilyLine Server is running on port ${PORT}`);
 });
