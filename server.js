@@ -1,6 +1,5 @@
 const express = require("express");
 const { Pool } = require("pg");
-require("dotenv").config();
 
 const app = express();
 
@@ -9,16 +8,13 @@ const PORT = process.env.PORT || 3000;
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: {
+    ssl:{
         rejectUnauthorized:false
     }
 });
 
 
-app.use(express.urlencoded({
-    extended:true
-}));
-
+app.use(express.urlencoded({extended:true}));
 app.use(express.json());
 
 
@@ -31,320 +27,317 @@ app.use((req,res,next)=>{
 });
 
 
-
-// בדיקת שרת
 app.get("/",(req,res)=>{
-    res.send("FamilyLine Server OK");
+    res.send(
+        "id_list_message=t-השרת פעיל בהצלחה"
+    );
 });
 
 
 
-// כניסה ראשית
-app.get("/api/v1/auth",async(req,res)=>{
+app.get("/api/v1/auth", async (req,res)=>{
 
 
-const phone =
-req.query.ApiPhone ||
-req.body.ApiPhone;
+    const phone =
+        req.query.ApiPhone || "";
 
 
-const digits =
-req.query.digits ||
-req.body.digits;
+    const digits =
+        req.query.digits || "";
 
 
+    try{
 
-try{
 
+        const result =
+        await pool.query(
+        `
+        SELECT u.*,t.tenant_name
+        FROM users u
+        JOIN tenants t
+        ON u.family_id=t.family_id
+        WHERE u.phone_number=$1
+        `,
+        [phone]
+        );
 
-const user = await pool.query(
-`
-SELECT 
-u.id,
-u.family_id,
-u.is_approved,
-t.tenant_name
 
-FROM users u
 
-JOIN tenants t
-ON u.family_id=t.family_id
+        if(result.rows.length > 0){
 
-WHERE u.phone_number=$1
 
-`,
-[phone]
-);
+            const user=result.rows[0];
 
 
+            if(user.is_approved){
 
-if(user.rows.length>0){
 
+                if(digits==="1"){
+                    return res.send(
+                        "go_to_folder=/1"
+                    );
+                }
 
-if(user.rows[0].is_approved){
 
+                if(digits==="2"){
+                    return res.send(
+                        "go_to_folder=/2"
+                    );
+                }
 
 
-if(digits==="1"){
+                return res.send(
+                "read=t-ברוכים הבאים למערכת להאזנה להודעות הקישו 1 להקלטת הודעה הקישו 2=digits,yes,1,1,5,Number,no"
+                );
 
-return res.send(
-"go_to_folder=/1"
-);
+            }
 
-}
+        }
 
 
-if(digits==="2"){
 
-return res.send(
-"go_to_folder=/2"
-);
+        if(!digits){
 
-}
+            return res.send(
+            "read=t-המספר אינו מוכר במערכת הקישו קוד הצטרפות=digits,yes,6,6,10,Number,no"
+            );
 
+        }
 
 
-return res.send(
 
-"read=t-ברוכים הבאים למערכת המשפחתית להאזנה להודעות הקישו 1 לשליחת הודעה חדשה הקישו 2=digits,yes,1,1,7,Number,no"
+        const family =
+        await pool.query(
+        "SELECT * FROM tenants WHERE join_code=$1",
+        [digits]
+        );
 
-);
 
+        if(family.rows.length===0){
 
-}
+            return res.send(
+            "id_list_message=t-הקוד שגוי"
+            );
 
+        }
 
 
-return res.send(
-"id_list_message=t-המשתמש ממתין לאישור מנהל&hangup=yes"
-);
 
+        await pool.query(
 
+        `
+        INSERT INTO users
+        (family_id,phone_number,user_name,is_approved)
+        VALUES($1,$2,$3,false)
+        ON CONFLICT DO NOTHING
+        `,
 
-}
+        [
+            family.rows[0].family_id,
+            phone,
+            "משתמש חדש"
+        ]
 
+        );
 
 
-// משתמש חדש
 
+        res.send(
+        "id_list_message=t-הבקשה נקלטה וממתינה לאישור"
+        );
 
-if(!digits){
 
-return res.send(
+    }
+    catch(err){
 
-"read=t-שלום. אנא הקישו קוד הצטרפות משפחתי=digits,yes,6,6,10,Number,no"
+        console.log(err);
 
-);
+        res.send(
+        "id_list_message=t-שגיאה בשרת"
+        );
 
-
-}
-
-
-
-const family =
-await pool.query(
-
-`
-SELECT family_id,tenant_name
-
-FROM tenants
-
-WHERE join_code=$1
-
-AND is_active=true
-
-`,
-[digits]
-
-);
-
-
-
-if(family.rows.length===0){
-
-
-return res.send(
-
-"id_list_message=t-הקוד שגוי&hangup=yes"
-
-);
-
-
-}
-
-
-
-await pool.query(
-
-`
-
-INSERT INTO users
-
-(
-family_id,
-phone_number,
-user_name,
-role,
-is_approved
-
-)
-
-VALUES
-
-($1,$2,$3,$4,$5)
-
-ON CONFLICT DO NOTHING
-
-`,
-
-[
-family.rows[0].family_id,
-phone,
-"משתמש חדש",
-"user",
-false
-]
-
-);
-
-
-
-return res.send(
-
-"id_list_message=t-הבקשה התקבלה וממתינה לאישור מנהל&hangup=yes"
-
-);
-
-
-
-}
-
-catch(err){
-
-console.log(err);
-
-return res.send(
-"id_list_message=t-תקלה בשרת"
-);
-
-}
+    }
 
 
 });
-
-
-
-
-
-// שלוחת האזנה
-
-app.get("/api/v1/listen",async(req,res)=>{
-
-
-const phone =
-req.query.ApiPhone;
-
-
-
-try{
-
-
-const result =
-await pool.query(
-
-`
-
-SELECT id,family_id
-
-FROM users
-
-WHERE phone_number=$1
-
-AND is_approved=true
-
-`,
-[phone]
-
-);
-
-
-if(result.rows.length===0){
-
-return res.send(
-"id_list_message=t-אין הרשאה"
-);
-
-}
-
-
-
-const msg =
-await pool.query(
-
-`
-
-SELECT *
-
-FROM messages
-
-WHERE family_id=$1
-
-AND deleted_globally=false
-
-ORDER BY id DESC
-
-LIMIT 1
-
-`,
-
-[
-result.rows[0].family_id
-]
-
-);
-
-
-
-if(msg.rows.length===0){
-
-return res.send(
-"id_list_message=t-אין הודעות חדשות"
-);
-
-}
-
-
-
-return res.send(
-
-"id_list_message=f-"+msg.rows[0].file_name
-
-);
-
-
-}
-
-catch(e){
-
-console.log(e);
-
-res.send(
-"id_list_message=t-שגיאה"
-);
-
-}
-
-
-});
-
-
 
 
 
 app.listen(PORT,()=>{
 
 console.log(
-"FamilyLine running on "+PORT
+"SERVER RUNNING "+PORT
+);
+
+});const express = require("express");
+const { Pool } = require("pg");
+
+const app = express();
+
+const PORT = process.env.PORT || 3000;
+
+
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl:{
+        rejectUnauthorized:false
+    }
+});
+
+
+app.use(express.urlencoded({extended:true}));
+app.use(express.json());
+
+
+app.use((req,res,next)=>{
+    res.setHeader(
+        "Content-Type",
+        "text/plain; charset=utf-8"
+    );
+    next();
+});
+
+
+app.get("/",(req,res)=>{
+    res.send(
+        "id_list_message=t-השרת פעיל בהצלחה"
+    );
+});
+
+
+
+app.get("/api/v1/auth", async (req,res)=>{
+
+
+    const phone =
+        req.query.ApiPhone || "";
+
+
+    const digits =
+        req.query.digits || "";
+
+
+    try{
+
+
+        const result =
+        await pool.query(
+        `
+        SELECT u.*,t.tenant_name
+        FROM users u
+        JOIN tenants t
+        ON u.family_id=t.family_id
+        WHERE u.phone_number=$1
+        `,
+        [phone]
+        );
+
+
+
+        if(result.rows.length > 0){
+
+
+            const user=result.rows[0];
+
+
+            if(user.is_approved){
+
+
+                if(digits==="1"){
+                    return res.send(
+                        "go_to_folder=/1"
+                    );
+                }
+
+
+                if(digits==="2"){
+                    return res.send(
+                        "go_to_folder=/2"
+                    );
+                }
+
+
+                return res.send(
+                "read=t-ברוכים הבאים למערכת להאזנה להודעות הקישו 1 להקלטת הודעה הקישו 2=digits,yes,1,1,5,Number,no"
+                );
+
+            }
+
+        }
+
+
+
+        if(!digits){
+
+            return res.send(
+            "read=t-המספר אינו מוכר במערכת הקישו קוד הצטרפות=digits,yes,6,6,10,Number,no"
+            );
+
+        }
+
+
+
+        const family =
+        await pool.query(
+        "SELECT * FROM tenants WHERE join_code=$1",
+        [digits]
+        );
+
+
+        if(family.rows.length===0){
+
+            return res.send(
+            "id_list_message=t-הקוד שגוי"
+            );
+
+        }
+
+
+
+        await pool.query(
+
+        `
+        INSERT INTO users
+        (family_id,phone_number,user_name,is_approved)
+        VALUES($1,$2,$3,false)
+        ON CONFLICT DO NOTHING
+        `,
+
+        [
+            family.rows[0].family_id,
+            phone,
+            "משתמש חדש"
+        ]
+
+        );
+
+
+
+        res.send(
+        "id_list_message=t-הבקשה נקלטה וממתינה לאישור"
+        );
+
+
+    }
+    catch(err){
+
+        console.log(err);
+
+        res.send(
+        "id_list_message=t-שגיאה בשרת"
+        );
+
+    }
+
+
+});
+
+
+
+app.listen(PORT,()=>{
+
+console.log(
+"SERVER RUNNING "+PORT
 );
 
 });
