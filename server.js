@@ -3,7 +3,7 @@ const { Pool } = require("pg");
 require("dotenv").config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -33,7 +33,7 @@ const safe = (fn) => async (req, res) => {
 };
 
 // ==========================================
-// 🔐 שלוחה ראשית - כניסה למערכת ואימות (WHITELIST)
+// כניסה למערכת ואימות (WHITELIST ONLY)
 // ==========================================
 app.get("/api/v1/auth", safe(async (req, res) => {
     const phone = p(req, "ApiPhone");
@@ -48,12 +48,11 @@ app.get("/api/v1/auth", safe(async (req, res) => {
     const user = userRes.rows[0];
     await pool.query("UPDATE users SET current_msg_index = 0 WHERE id = $1", [user.id]);
 
-    // תפריט ראשי לפי האפיון (הוסרו התייחסויות אסורות)
     return res.send(`read=t-ברוכים הבאים למערכת המשפחתית. להאזנה להודעות הקש 1. להשארת הודעה הקש 2. לאולפן הקלטות מיוחד הקש 3. לנתוני מערכת הקש 4. לניהול המערכת למנהל בלבד הקש 5. ליצירה וניהול קבוצות משפחתיות הקש 6=ApiDigits,yes,1,1,6,Number,no`);
 }));
 
 // ==========================================
-// 📂 שלוחה 1 – הודעות שלי (חדשות, כל ההודעות, ששלחתי)
+// שלוחה 1 – הודעות שלי (מאחד קבוצות, משפחה ואישי)
 // ==========================================
 app.get("/api/v1/folder1", safe(async (req, res) => {
     return res.send(`read=t-להודעות חדשות בלבד הקש 1. לכל ההודעות הקש 2. להודעות ששלחתם הקש 3=ApiDigits,yes,1,1,3,Number,no`);
@@ -61,7 +60,7 @@ app.get("/api/v1/folder1", safe(async (req, res) => {
 
 app.get("/api/v1/listen", safe(async (req, res) => {
     const phone = p(req, "ApiPhone");
-    const subFolder = p(req, "SubFolder") || p(req, "ApiExtension"); // גיבוי למקרה שימות המשיח משתמשת בשם השלוחה
+    const subFolder = p(req, "SubFolder") || p(req, "ApiExtension"); 
     const action = p(req, "ApiDigits");
     const duration = parseInt(p(req, "ApiTime") || "0"); 
 
@@ -70,7 +69,6 @@ app.get("/api/v1/listen", safe(async (req, res) => {
     const user = userRes.rows[0];
 
     let lastMsgId = p(req, "LastMsgId");
-    // סימון כנקרא: אם שמע מעל 20 שניות או לחץ לעבור להודעה הבאה
     if (lastMsgId && (duration >= 20 || action === "1")) {
         await pool.query(`INSERT INTO message_reads (user_id, message_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [user.id, lastMsgId]);
     }
@@ -78,7 +76,6 @@ app.get("/api/v1/listen", safe(async (req, res) => {
     let msgsQuery = "";
     let queryParams = [];
 
-    // 1.1 הודעות חדשות (מהישן לחדש)
     if (subFolder === "1" || subFolder === "1.1") {
         msgsQuery = `
             SELECT m.*, u.user_name as sender_name FROM messages m
@@ -91,7 +88,6 @@ app.get("/api/v1/listen", safe(async (req, res) => {
             )
             ORDER BY m.id ASC`;
         queryParams = [user.id];
-    // 1.2 כל ההודעות (מהחדש לישן)
     } else if (subFolder === "2" || subFolder === "1.2") {
         msgsQuery = `
             SELECT m.*, u.user_name as sender_name FROM messages m
@@ -104,7 +100,6 @@ app.get("/api/v1/listen", safe(async (req, res) => {
             )
             ORDER BY m.id DESC`;
         queryParams = [user.id];
-    // 1.3 הודעות ששלחתי (מהחדש לישן)
     } else if (subFolder === "3" || subFolder === "1.3") {
         msgsQuery = `
             SELECT m.*, 'אתה' as sender_name FROM messages m
@@ -120,13 +115,10 @@ app.get("/api/v1/listen", safe(async (req, res) => {
     if (idx >= msgsRes.rows.length) idx = 0;
     const currentMsg = msgsRes.rows[idx];
 
-    // מנגנון מחיקה לפי חוקי האפיון
     if (action === "7") { 
         if (user.role === "admin" || currentMsg.sender_id === user.id || subFolder === "3") {
-            // מחיקה לכולם אם זה מנהל או השולח עצמו
             await pool.query("UPDATE messages SET is_deleted = true WHERE id = $1", [currentMsg.id]);
         } else {
-            // מחיקה מקומית בלבד אם זה משתמש אחר
             await pool.query(`INSERT INTO message_reads (user_id, message_id, is_hidden_locally) VALUES ($1, $2, true) ON CONFLICT (user_id, message_id) DO UPDATE SET is_hidden_locally = true`, [user.id, currentMsg.id]);
         }
         return res.send("id_list_message=t-ההודעה נמחקה&go_to_folder=current");
@@ -146,7 +138,7 @@ app.get("/api/v1/listen", safe(async (req, res) => {
 }));
 
 // ==========================================
-// 📂 שלוחה 2 – השארת הודעה
+// שלוחה 2 – השארת הודעה
 // ==========================================
 app.get("/api/v1/folder2", safe(async (req, res) => {
     return res.send(`read=t-להשארת הודעה לכל המשפחה הקש 1. להשארת הודעה לקבוצה הקש 2. להשארת הודעה אישית הקש 3=ApiDigits,yes,1,1,3,Number,no`);
@@ -211,14 +203,14 @@ app.get("/api/v1/record", safe(async (req, res) => {
 }));
 
 // ==========================================
-// 📂 שלוחה 3 – אולפן הקלטות מיוחד
+// שלוחה 3 – אולפן הקלטות מיוחד
 // ==========================================
 app.get("/api/v1/studio", safe(async (req, res) => {
     return res.send("id_list_message=t-ברוכים הבאים לאולפן ההקלטות המיוחד. פונקציה זו בפיתוח ותהיה זמינה בקרוב&go_to_folder=..");
 }));
 
 // ==========================================
-// 📂 שלוחה 4 – נתוני מערכת
+// שלוחה 4 – נתוני מערכת
 // ==========================================
 app.get("/api/v1/stats", safe(async (req, res) => {
     const phone = p(req, "ApiPhone");
@@ -236,7 +228,7 @@ app.get("/api/v1/stats", safe(async (req, res) => {
 }));
 
 // ==========================================
-// 📂 שלוחה 5 – ניהול מערכת (מנהל בלבד)
+// שלוחה 5 – ניהול מערכת (מנהל בלבד)
 // ==========================================
 app.get("/api/v1/admin", safe(async (req, res) => {
     const phone = p(req, "ApiPhone");
@@ -263,7 +255,7 @@ app.get("/api/v1/admin_action", safe(async (req, res) => {
 }));
 
 // ==========================================
-// 📂 שלוחה 6 – יצירה וניהול קבוצות (לכל משתמש)
+// שלוחה 6 – יצירה וניהול קבוצות (לכל משתמש)
 // ==========================================
 app.get("/api/v1/manage_groups", safe(async (req, res) => {
     return res.send(`read=t-ליצירת קבוצה חדשה הקש 1. להוספת חבר לקבוצה קיימת הקש 2. להסרת חבר מקבוצה הקש 3=ApiDigits,yes,1,1,3,Number,no`);
@@ -329,7 +321,8 @@ app.get("/api/v1/group_member_action", safe(async (req, res) => {
     }
 }));
 
-app.listen(PORT, async () => {
+// הפעלת השרת תוך הגדרת הכתובת המתאימה ל-Render
+app.listen(PORT, "0.0.0.0", async () => {
     console.log(`SERVER ONLINE ON PORT ${PORT}`);
     try {
         await pool.query(`
