@@ -13,13 +13,16 @@ const pool = new Pool({
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
+// הגדרת תגובת טקסט נקי עבור ימות המשיח
 app.use((req, res, next) => {
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
     next();
 });
 
+// פונקציית עזר לקבלת פרמטרים מכל סוג בקשה
 const p = (req, k) => req.query?.[k] ?? req.body?.[k] ?? null;
 
+// פונקציית עזר לטיפול בטוח בשגיאות מבלי שהשרת יקרוס
 const safe = (fn) => async (req, res) => {
     try {
         await fn(req, res);
@@ -30,7 +33,7 @@ const safe = (fn) => async (req, res) => {
 };
 
 // ==========================================
-// 🔐 כניסה למערכת ואימות (WHITELIST ONLY)
+// 🔐 שלוחה ראשית - כניסה למערכת ואימות (WHITELIST)
 // ==========================================
 app.get("/api/v1/auth", safe(async (req, res) => {
     const phone = p(req, "ApiPhone");
@@ -45,12 +48,12 @@ app.get("/api/v1/auth", safe(async (req, res) => {
     const user = userRes.rows[0];
     await pool.query("UPDATE users SET current_msg_index = 0 WHERE id = $1", [user.id]);
 
-    // הוספנו אפשרות 6 לתפריט הראשי: ניהול ויצירת קבוצות משפחתיות
+    // תפריט ראשי לפי האפיון (הוסרו התייחסויות אסורות)
     return res.send(`read=t-ברוכים הבאים למערכת המשפחתית. להאזנה להודעות הקש 1. להשארת הודעה הקש 2. לאולפן הקלטות מיוחד הקש 3. לנתוני מערכת הקש 4. לניהול המערכת למנהל בלבד הקש 5. ליצירה וניהול קבוצות משפחתיות הקש 6=ApiDigits,yes,1,1,6,Number,no`);
 }));
 
 // ==========================================
-// 📂 שלוחה 1 – הודעות שלי (מאחד קבוצות, משפחה ואישי)
+// 📂 שלוחה 1 – הודעות שלי (חדשות, כל ההודעות, ששלחתי)
 // ==========================================
 app.get("/api/v1/folder1", safe(async (req, res) => {
     return res.send(`read=t-להודעות חדשות בלבד הקש 1. לכל ההודעות הקש 2. להודעות ששלחתם הקש 3=ApiDigits,yes,1,1,3,Number,no`);
@@ -58,7 +61,7 @@ app.get("/api/v1/folder1", safe(async (req, res) => {
 
 app.get("/api/v1/listen", safe(async (req, res) => {
     const phone = p(req, "ApiPhone");
-    const subFolder = p(req, "SubFolder"); 
+    const subFolder = p(req, "SubFolder") || p(req, "ApiExtension"); // גיבוי למקרה שימות המשיח משתמשת בשם השלוחה
     const action = p(req, "ApiDigits");
     const duration = parseInt(p(req, "ApiTime") || "0"); 
 
@@ -67,6 +70,7 @@ app.get("/api/v1/listen", safe(async (req, res) => {
     const user = userRes.rows[0];
 
     let lastMsgId = p(req, "LastMsgId");
+    // סימון כנקרא: אם שמע מעל 20 שניות או לחץ לעבור להודעה הבאה
     if (lastMsgId && (duration >= 20 || action === "1")) {
         await pool.query(`INSERT INTO message_reads (user_id, message_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [user.id, lastMsgId]);
     }
@@ -74,7 +78,8 @@ app.get("/api/v1/listen", safe(async (req, res) => {
     let msgsQuery = "";
     let queryParams = [];
 
-    if (subFolder === "1") {
+    // 1.1 הודעות חדשות (מהישן לחדש)
+    if (subFolder === "1" || subFolder === "1.1") {
         msgsQuery = `
             SELECT m.*, u.user_name as sender_name FROM messages m
             JOIN users u ON m.sender_id = u.id
@@ -86,7 +91,8 @@ app.get("/api/v1/listen", safe(async (req, res) => {
             )
             ORDER BY m.id ASC`;
         queryParams = [user.id];
-    } else if (subFolder === "2") {
+    // 1.2 כל ההודעות (מהחדש לישן)
+    } else if (subFolder === "2" || subFolder === "1.2") {
         msgsQuery = `
             SELECT m.*, u.user_name as sender_name FROM messages m
             JOIN users u ON m.sender_id = u.id
@@ -98,7 +104,8 @@ app.get("/api/v1/listen", safe(async (req, res) => {
             )
             ORDER BY m.id DESC`;
         queryParams = [user.id];
-    } else if (subFolder === "3") {
+    // 1.3 הודעות ששלחתי (מהחדש לישן)
+    } else if (subFolder === "3" || subFolder === "1.3") {
         msgsQuery = `
             SELECT m.*, 'אתה' as sender_name FROM messages m
             WHERE m.sender_id = $1 AND m.is_deleted = false
@@ -113,10 +120,13 @@ app.get("/api/v1/listen", safe(async (req, res) => {
     if (idx >= msgsRes.rows.length) idx = 0;
     const currentMsg = msgsRes.rows[idx];
 
+    // מנגנון מחיקה לפי חוקי האפיון
     if (action === "7") { 
         if (user.role === "admin" || currentMsg.sender_id === user.id || subFolder === "3") {
+            // מחיקה לכולם אם זה מנהל או השולח עצמו
             await pool.query("UPDATE messages SET is_deleted = true WHERE id = $1", [currentMsg.id]);
         } else {
+            // מחיקה מקומית בלבד אם זה משתמש אחר
             await pool.query(`INSERT INTO message_reads (user_id, message_id, is_hidden_locally) VALUES ($1, $2, true) ON CONFLICT (user_id, message_id) DO UPDATE SET is_hidden_locally = true`, [user.id, currentMsg.id]);
         }
         return res.send("id_list_message=t-ההודעה נמחקה&go_to_folder=current");
@@ -132,7 +142,7 @@ app.get("/api/v1/listen", safe(async (req, res) => {
     }
 
     const formattedDate = new Date(currentMsg.created_at).toLocaleDateString('he-IL');
-    return res.send(`id_list_message=t-הודעה מאת ${currentMsg.sender_name} מתאריך ${formattedDate}&id_list_message=f-${currentMsg.file_path}&read=t-להודעה הבאה הקש 1. להודעה הקודמת הקש 2. למחיקה הקש 7=ApiDigits,yes,1,1,7,Number,no&LastMsgId=${currentMsg.id}`);
+    return res.send(`id_list_message=t-הודעה מאת ${currentMsg.sender_name} מתאריך ${formattedDate}&id_list_message=f-${currentMsg.file_path}&read=t-להודעה הבאה הקש 1. להודעה הקודמת הקש 2. למחיקה הקש 7=ApiDigits,yes,1,1,7,Number,no&LastMsgId=${currentMsg.id}&SubFolder=${subFolder}`);
 }));
 
 // ==========================================
@@ -163,7 +173,7 @@ app.get("/api/v1/choose_group", safe(async (req, res) => {
         const selectedIdx = parseInt(digits) - 1;
         if (selectedIdx >= 0 && selectedIdx < groupsRes.rows.length) {
             const group = groupsRes.rows[selectedIdx];
-            return res.send(`go_to_folder=/2/2/record?target_type=group&target_id=${group.group_id}`);
+            return res.send(`go_to_folder=record?target_type=group&target_id=${group.group_id}`);
         }
         return res.send("id_list_message=t-בחירה שגויה&go_to_folder=current");
     }
@@ -180,7 +190,7 @@ app.get("/api/v1/private_target", safe(async (req, res) => {
     const targetRes = await pool.query("SELECT id FROM users WHERE phone_number = $1 AND is_approved = true", [digits]);
     if (!targetRes.rows.length) return res.send("id_list_message=t-מספר הטלפון לא קיים במערכת&go_to_folder=current");
     
-    return res.send(`go_to_folder=/2/3/record?target_type=user&target_id=${targetRes.rows[0].id}`);
+    return res.send(`go_to_folder=record?target_type=user&target_id=${targetRes.rows[0].id}`);
 }));
 
 app.get("/api/v1/record", safe(async (req, res) => {
@@ -191,10 +201,65 @@ app.get("/api/v1/record", safe(async (req, res) => {
 
     const userRes = await pool.query("SELECT id FROM users WHERE phone_number = $1", [phone]);
     if (!userRes.rows.length) return res.send("id_list_message=t-שגיאת הרשאה&hangup=yes");
-    if (!fileUrl) return res.send("type=record&record_path=current&record_ok_go_to=current");
+    
+    if (!fileUrl) {
+        return res.send("type=record&record_path=current&record_ok_go_to=current");
+    }
 
     await pool.query(`INSERT INTO messages (sender_id, target_type, target_id, file_path, msg_type) VALUES ($1, $2, $3, $4, 'regular')`, [userRes.rows[0].id, targetType, targetId, fileUrl]);
     return res.send("id_list_message=t-ההודעה הוקלטה ונשמרה בהצלחה&go_to_folder=..");
+}));
+
+// ==========================================
+// 📂 שלוחה 3 – אולפן הקלטות מיוחד
+// ==========================================
+app.get("/api/v1/studio", safe(async (req, res) => {
+    return res.send("id_list_message=t-ברוכים הבאים לאולפן ההקלטות המיוחד. פונקציה זו בפיתוח ותהיה זמינה בקרוב&go_to_folder=..");
+}));
+
+// ==========================================
+// 📂 שלוחה 4 – נתוני מערכת
+// ==========================================
+app.get("/api/v1/stats", safe(async (req, res) => {
+    const phone = p(req, "ApiPhone");
+    const userRes = await pool.query("SELECT id FROM users WHERE phone_number = $1", [phone]);
+    const userId = userRes.rows[0].id;
+
+    const totalUsers = await pool.query("SELECT COUNT(*) FROM users WHERE is_approved = true");
+    const totalMsgs = await pool.query("SELECT COUNT(*) FROM messages WHERE is_deleted = false");
+    const newMsgs = await pool.query(`
+        SELECT COUNT(*) FROM messages m WHERE m.is_deleted = false AND m.id NOT IN (SELECT message_id FROM message_reads WHERE user_id = $1)
+        AND (m.target_type = 'all' OR (m.target_type = 'user' AND m.target_id = $1) OR (m.target_type = 'group' AND m.target_id IN (SELECT group_id FROM group_members WHERE user_id = $1)))
+    `, [userId]);
+
+    return res.send(`id_list_message=t-במערכת רשומים ${totalUsers.rows[0].count} בני משפחה. יש לך ${newMsgs.rows[0].count} הודעות חדשות. סך הכל במערכת ${totalMsgs.rows[0].count} הודעות.&go_to_folder=..`);
+}));
+
+// ==========================================
+// 📂 שלוחה 5 – ניהול מערכת (מנהל בלבד)
+// ==========================================
+app.get("/api/v1/admin", safe(async (req, res) => {
+    const phone = p(req, "ApiPhone");
+    const userRes = await pool.query("SELECT role FROM users WHERE phone_number = $1", [phone]);
+    if (!userRes.rows.length || userRes.rows[0].role !== "admin") return res.send("id_list_message=t-שלוחה זו מיועדת למנהל בלבד&go_to_folder=..");
+    return res.send(`read=t-להוספת בן משפחה חדש הקש 1. להסרת בן משפחה הקש 2=ApiDigits,yes,1,1,2,Number,no`);
+}));
+
+app.get("/api/v1/admin_action", safe(async (req, res) => {
+    const action = p(req, "AdminAction") || p(req, "ApiDigits"); 
+    const digits = p(req, "MemberPhone");
+
+    if (!digits) {
+        return res.send(`read=t-נא להקיש את מספר הטלפון של בן המשפחה ובסיום סולמית=ApiDigits,yes,9,12,10,Number,no&AdminAction=${action}`);
+    }
+
+    if (action === "1") {
+        await pool.query(`INSERT INTO users (family_id, phone_number, user_name, role, is_approved) VALUES (1, $1, 'בן משפחה', 'user', true) ON CONFLICT (phone_number) DO UPDATE SET is_approved = true`, [digits]);
+        return res.send("id_list_message=t-בן המשפחה הוסף ואושר בהצלחה&go_to_folder=..");
+    } else {
+        await pool.query("UPDATE users SET is_approved = false WHERE phone_number = $1", [digits]);
+        return res.send("id_list_message=t-המשתמש הוסר מהמערכת&go_to_folder=..");
+    }
 }));
 
 // ==========================================
@@ -204,42 +269,32 @@ app.get("/api/v1/manage_groups", safe(async (req, res) => {
     return res.send(`read=t-ליצירת קבוצה חדשה הקש 1. להוספת חבר לקבוצה קיימת הקש 2. להסרת חבר מקבוצה הקש 3=ApiDigits,yes,1,1,3,Number,no`);
 }));
 
-// יצירת קבוצה חדשה
 app.get("/api/v1/create_group", safe(async (req, res) => {
     const phone = p(req, "ApiPhone");
-    const fileUrl = p(req, "FileUrl"); // נשתמש בהקלטת קול של המשתמש עבור שם הקבוצה
+    const fileUrl = p(req, "FileUrl");
 
     const userRes = await pool.query("SELECT id FROM users WHERE phone_number = $1", [phone]);
     const userId = userRes.rows[0].id;
 
     if (!fileUrl) {
-        // מבקש מהמשתמש להקליט את שם הקבוצה (לדוגמה: "האחים שפירא")
         return res.send("read=t-אנא הקלט את שם הקבוצה לאחר הצליל ובסיום הקש סולמית=ApiDigits,yes,1,1,1,Number,no&type=record&record_path=current&record_ok_go_to=current");
     }
 
-    // יוצר את הקבוצה ב-DB
-    const groupRes = await pool.query(`
-        INSERT INTO groups (family_id, group_name, created_by) 
-        VALUES (1, 'קבוצה מוקלטת', $1) RETURNING group_id
-    `, [userId]);
-    
-    // מוסיף את היוצר עצמו אוטומטית כחבר ראשון בקבוצה
+    const groupRes = await pool.query(`INSERT INTO groups (family_id, group_name, created_by) VALUES (1, 'קבוצה מוקלטת', $1) RETURNING group_id`, [userId]);
     await pool.query(`INSERT INTO group_members (group_id, user_id) VALUES ($1, $2)`, [groupRes.rows[0].group_id, userId]);
 
     return res.send("id_list_message=t-הקבוצה נוצרה בהצלחה. כעת תוכל להוסיף לה חברים.&go_to_folder=..");
 }));
 
-// הוספת או הסרת חבר מקבוצה
 app.get("/api/v1/group_member_action", safe(async (req, res) => {
     const phone = p(req, "ApiPhone");
-    const action = p(req, "GroupAction"); // 2=הוספה, 3=הסרה
-    const digits = p(req, "ApiDigits"); // מספר הטלפון של החבר שמקלידים
+    const action = p(req, "GroupAction"); 
+    const digits = p(req, "ApiDigits"); 
     const groupId = p(req, "GroupId");
 
     const userRes = await pool.query("SELECT id FROM users WHERE phone_number = $1", [phone]);
     const userId = userRes.rows[0].id;
 
-    // שלב א': בחירת הקבוצה אותה רוצים לנהל (רק קבוצות שהמשתמש יצר או חבר בהן)
     if (!groupId) {
         const groupsRes = await pool.query(`SELECT g.group_id, g.group_name FROM groups g WHERE g.created_by = $1`, [userId]);
         if (!groupsRes.rows.length) return res.send("id_list_message=t-אין קבוצות בבעלותך&go_to_folder=..");
@@ -257,62 +312,20 @@ app.get("/api/v1/group_member_action", safe(async (req, res) => {
         return res.send(`read=t-${speech}=ApiDigits,yes,1,1,${groupsRes.rows.length},Number,no`);
     }
 
-    // שלב ב': הקשת מספר הטלפון של החבר שרוצים להוסיף או להסיר
     if (groupId && !digits) {
         return res.send(`read=t-נא להקיש את מספר הטלפון של בן המשפחה ובסיום סולמית=ApiDigits,yes,9,12,10,Number,no&GroupId=${groupId}&GroupAction=${action}`);
     }
 
-    // שלב ג': ביצוע הפעולה מול ה-DB (רק בני משפחה רשומים ומאושרים)
     const targetUserRes = await pool.query("SELECT id FROM users WHERE phone_number = $1 AND is_approved = true", [digits]);
     if (!targetUserRes.rows.length) return res.send("id_list_message=t-מספר הטלפון לא רשום במערכת&go_to_folder=..");
     const targetUserId = targetUserRes.rows[0].id;
 
     if (action === "2") {
-        // הוספה לקבוצה
         await pool.query(`INSERT INTO group_members (group_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [groupId, targetUserId]);
         return res.send("id_list_message=t-החבר הוסף לקבוצה בהצלחה&go_to_folder=..");
     } else {
-        // הסרה מקבוצה
         await pool.query(`DELETE FROM group_members WHERE group_id = $1 AND user_id = $2`, [groupId, targetUserId]);
         return res.send("id_list_message=t-החבר הוסר מהקבוצה&go_to_folder=..");
-    }
-}));
-
-// ==========================================
-// 📂 שלוחה 4 ו-5 (סטטיסטיקות וניהול מנהל)
-// ==========================================
-app.get("/api/v1/stats", safe(async (req, res) => {
-    const phone = p(req, "ApiPhone");
-    const userRes = await pool.query("SELECT id FROM users WHERE phone_number = $1", [phone]);
-    const userId = userRes.rows[0].id;
-
-    const totalUsers = await pool.query("SELECT COUNT(*) FROM users WHERE is_approved = true");
-    const totalMsgs = await pool.query("SELECT COUNT(*) FROM messages WHERE is_deleted = false");
-    const newMsgs = await pool.query(`
-        SELECT COUNT(*) FROM messages m  WHERE m.is_deleted = false AND m.id NOT IN (SELECT message_id FROM message_reads WHERE user_id = $1)
-        AND (m.target_type = 'all' OR (m.target_type = 'user' AND m.target_id = $1) OR (m.target_type = 'group' AND m.target_id IN (SELECT group_id FROM group_members WHERE user_id = $1)))
-    `, [userId]);
-
-    return res.send(`id_list_message=t-במערכת רשומים ${totalUsers.rows[0].count} בני משפחה. יש לך ${newMsgs.rows[0].count} הודעות חדשות. סך הכל במערכת ${totalMsgs.rows[0].count} הודעות.&go_to_folder=..`);
-}));
-
-app.get("/api/v1/admin", safe(async (req, res) => {
-    const phone = p(req, "ApiPhone");
-    const userRes = await pool.query("SELECT role FROM users WHERE phone_number = $1", [phone]);
-    if (!userRes.rows.length || userRes.rows[0].role !== "admin") return res.send("id_list_message=t-שלוחה זו מיועדת למנהל בלבד&go_to_folder=..");
-    return res.send(`read=t-להוספת בן משפחה חדש הקש 1. להסרת בן משפחה הקש 2=ApiDigits,yes,1,1,2,Number,no`);
-}));
-
-app.get("/api/v1/admin_action", safe(async (req, res) => {
-    const action = p(req, "AdminAction"); const digits = p(req, "ApiDigits");
-    if (!digits) return res.send(`read=t-נא להקיש את מספר הטלפון ובסיום סולמית=ApiDigits,yes,9,12,10,Number,no`);
-
-    if (action === "1") {
-        await pool.query(`INSERT INTO users (family_id, phone_number, user_name, role, is_approved) VALUES (1, $1, 'בן משפחה', 'user', true) ON CONFLICT (phone_number) DO UPDATE SET is_approved = true`, [digits]);
-        return res.send("id_list_message=t-בן המשפחה הוסף ואושר בהצלחה&go_to_folder=..");
-    } else {
-        await pool.query("UPDATE users SET is_approved = false WHERE phone_number = $1", [digits]);
-        return res.send("id_list_message=t-המשתמש הוסר מהמערכת&go_to_folder=..");
     }
 }));
 
